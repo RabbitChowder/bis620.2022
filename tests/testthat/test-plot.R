@@ -20,6 +20,25 @@ test_that(
   {
     data(ukb_accel)
     p = accel_plot(ukb_accel[1:100,])
-    expect_doppelganger("first-100-samples", p)
+    vdiffr::expect_doppelganger("first-100-samples", p)
+  }
+)
+
+test_that(
+  "The accel_plot() is correct for time-series data.",
+  {
+    data(ukb_accel)
+    s<-spectral_signature(ukb_accel[1:100, ], take_log = TRUE)
+    expect_true(inherits(s, "tbl_df"))
+  }
+)
+
+test_that(
+  "The accel_plot() is correct for time-series data.",
+  {
+    data(ukb_accel)
+    s<-spectral_signature(ukb_accel[1:100, ], take_log = F)
+    p <- accel_plot(s)
+    vdiffr::expect_doppelganger("first-100-samples-specsig", p)
   }
 )
