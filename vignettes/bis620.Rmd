@@ -1,0 +1,347 @@
+---
+title: "Bis620 - Final Project"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{bis620}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+theme:
+ bg: "#121212"
+ fg: "#E4E4E4"
+ base_font:
+ google: "Prompt"
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r message = FALSE, warning = FALSE, include = FALSE}
+library(bis620.2022)
+#devtools::load_all()
+library(usethis)
+library(caret)
+library(dplyr)
+library(gtsummary)
+library(pROC)
+library(MLmetrics)
+library(patchwork)
+library(pROC)
+library(ggsci)
+library(xgboost)
+data(newdata)
+```
+
+
+### Author: Anjie Yao, Hang Li 
+
+## Background and Motvation 
+
+Urinary Tract Infections are common infections that happen when bacteria enter the urethra, and infect the urinary tract. UTIs can happen anywhere in the urinary system, including the kidneys, ureters, bladder, and urethra. UTIs are very common, especially in women. Women get UTIs up to 30 times more often than men do. Urine culture is a lab test for bacteria or germs in a urine sample. The results of urine culture usually take 1 to 3 days. 
+
+UTIs are common clinical conditions in emergency department (ED), with more than 3 million ED visits each year for UTIs, while it also has high diagnostic error rates (30-50%). Urine culture as the standard for UTIs diagnosis is usually not available because of the time it takes. Evaluations and treatment decision in a wide spectrum of patient populations and disease severity are needed to be conducted in ED, and UTIs are typically diagnosed using a combination of methods in ED, including a physical examination and a review of the patient's symptoms. 
+
+Emergency physicians also face a different set of challenges than those by infectious disease specialists in a non-ED environment, and that diagnosis of UTI can often be difficult when mixed with a plethora of other conditions such as urolithiasis. With such complexity in ED-environment and noticeable insufficient diagnosis accuracy in ED, a decision support system based on machine learning algorithms that incorporate data such as patients' demographics, vitals, labs, past medical and surgical history, and medications should be developed to assist with UTIs diagnosis. 
+
+While many factors such as physical findings, urinalysis, and past medical history are researched to be correlated with UTI diagnosis by other studies. What motivate this study is to understand how demographics, socioeconomic, and arrival information factors would impact the diagnosis of urinary tract infections. Some previous studies have assessed the association between the use of Medicaid, use of an interpreter, and census tract–level deprivation and overall UTI or multidrug-resistant (MDR) UTI. UTI is one of the most prevalent infections occurring at various stages of life for women, and it is one of the most frequently diagnosed infections in older adults. 
+
+This study also interested in exploring the dataset that are obtained and preprocessed in the study https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0194085#pone.0194085.ref001. Data included four emergency departments (ED) adult visits data between March 2013 to May 2016. Variables categories are ‘Urinalysis’, ‘Physical Findings’, ‘Demographics/Arrival Info’, ‘Vitals’, ‘Labs’, ‘Past Medical/Surgical History’, and ‘Outpatient Medications’. The outcome variable is denoted as “UTI_diag”. Features of exploring insights from the data such as functions for visualization plots will also be incorporated.
+
+## Research Question 
+Will the patients' Demographics/Arrival Information, including chief complaint, age, gender, race, marital status, employ status, insurance status, and arrival type influence the urinary tract infection diagnosis? In addition, are the same variables still important when a patient has recurrent UTI? How does knowing a patient is recurrent affect our model?
+
+## Data cleaning and exploration
+
+Here, I look at the discrete levels that a discrete variable of interest has. It can be seen from the figure that each discrete variable of interest has a large number of discrete levels. And there are extreme differences in the frequency between these discrete levels, which are manifested in the variables `maritalStatus`, `race`, `employStatus`, and `arrival` with some very few levels. This may cause difficulties in the subsequent modeling process.
+
+```{r, warning=FALSE, message=FALSE, fig.width=15, fig.height=12}
+get_p <- function(x){
+  table(newdata[,x]) %>%
+  as.data.frame() %>%
+  ggplot(aes(x = reorder(Var1, Freq), y = Freq)) +
+  geom_bar(stat = 'identity', fill = 'seagreen') +
+  coord_flip() +
+  labs(x = '', y = 'Frequency', title = x) +
+  theme_bw()
+}
+p1 <- get_p('chief_complaint')
+p2 <- get_p('race')
+p3 <- get_p('maritalStatus')
+p4 <- get_p('employStatus')
+p5 <- get_p('insurance_status')
+p6 <- get_p('arrival')
+
+p1 + p2 + p3 + p4 + p5 + p6 + plot_layout(ncol = 3)
+```
+
+In addition, I checked the missing part of the data, and it can be found from the results that there is no missing part in the data.
+
+```{r}
+#find data having NA value
+na_count = sapply(newdata, function(x) sum(is.na(x)))
+which(na_count > 1)
+```
+
+To display to distribution of variables, a function named `var_plot` is created for custom choice of variable, plotting the count of each, grouped by UTI diagnosis. The followings are plots of variables that we are interested in. 
+
+```{r fig.width=6,fig.height=4}
+ggplot(newdata, aes(x = age)) +
+  geom_histogram(fill = 'white', col = 'black') +
+  theme_bw()
+```
+
+```{r message = FALSE, warning = FALSE}
+newdata%>% 
+  select(UTI_diag,gender)%>%
+  tbl_summary(by = "UTI_diag")
+```
+
+## Analysis
+
+The dataset has been added to our `bis620.2022` package. Our target variable is binary, having "Yes" as UTI diagnosis and "No" as the opposite. We denoted them as 1 and 0 respectively for modeling. Data of variables that we are interested in are subsetted from the overall dataset. 
+
+```{r include = FALSE}
+data = newdata 
+data$UTI_diag[data$UTI_diag == "Yes"]<-1 
+data$UTI_diag[data$UTI_diag == "No"]<-0 
+data$UTI_diag <- as.numeric(data$UTI_diag)
+
+data=data[ , c('UTI_diag','chief_complaint','age','gender','race','employStatus','maritalStatus',
+          'insurance_status','arrival')]
+```
+
+One-hot encoding is processed that categorical data are converted into numerical data for use in machine learning models. It creates new binary columns, indicating the presence of each possible value from the corresponding original data. Data is also splitted into train and test data for evaluation 
+
+```{r include = FALSE}
+#One-hot encoding 
+dummy <- dummyVars(" ~ .", data=data)
+data <- data.frame(predict(dummy, newdata = data))
+
+data$UTI_diag <- factor(data$UTI_diag)
+#### train,test data split
+parts = createDataPartition(data$UTI_diag, p = 0.8, list = F)
+train = data[parts, ]
+test = data[-parts, ]
+```
+
+
+##### Logistic Regression Model
+
+Logistic regression is a very classic algorithm. Although Logistic Regression is called regression, it is actually a classification model and is often used for binary classification. Logistic Regression is loved by the industry because of its simplicity, parallelization, and strong explainability. The results of the logistic regression model we constructed here are shown below. From the results, it can be found that the accuracy of the model prediction is 0.79, which means that the model can correctly predict 79% of the samples. The sensitivity of the model prediction is 0.80, indicating that the logistic regression model can correctly predict 80% of the positive samples. The specificity of the model prediction is 0.59, indicating that the logistic regression model can correctly predict 59% of the negative samples.
+
+```{r, warning=FALSE, message=FALSE}
+mod_lr <- glm(UTI_diag ~ .,
+               data = train, family = binomial)
+pred_lr <- predict.glm(mod_lr, newdata = test, type = 'response')
+get_m <- function(y, pred){
+  pred <- as.numeric(pred >= 0.5)
+  pred <- factor(pred, levels = c(0, 1))
+  caret::confusionMatrix(y, pred)
+}
+get_m(test$UTI_diag, pred_lr)
+```
+
+##### XGBoost 
+
+XGBoost is the abbreviation of eXtreme Gradient Boosting. It is a very powerful Boosting algorithm toolkit. Its excellent performance (effect and speed) has allowed it to dominate the data science competition solution list for a long time. Now many big manufacturers Machine learning solutions will still prefer this model. XGBoost is excellent in terms of parallel computing efficiency, missing value handling, overfitting control, and predictive generalization capabilities. Based on the model results, it can be found that the most important variable is `age`, followed by `chief_complaint` and `gender`.
+
+
+
+```{r, message = FALSE, warning = FALSE}
+dat_m = model.matrix(~., data[,-1])
+train_gb = xgb.DMatrix(data=dat_m[parts,], label=data$UTI_diag[parts])
+
+dtrain <- xgb.DMatrix(data = data.matrix(train[,-1]), 
+                         label = as.integer(train[,1]) - 1)
+dtest <- xgb.DMatrix(data = data.matrix(test[,-1]), 
+                         label = as.integer(test[,1]) - 1)
+mod_xgb <- xgboost(data = dtrain,  max_depth = 10, eta = 0.5, 
+                 objective = "binary:logistic", nround = 25) 
+
+importance_matrix = xgb.importance(colnames(dtrain), model = mod_xgb)
+importance_matrix %>% as.data.frame() %>%
+  arrange(desc(Gain)) %>%
+  head(20) %>%
+  ggplot(aes(x = reorder(Feature, Gain), y = Gain)) +
+  geom_point() +
+  geom_segment(aes(xend = reorder(Feature, Gain), yend = 0)) +
+  theme_bw() +
+  coord_flip() +
+  labs(x = '', y = 'Importance')
+```
+
+The prediction results of the model are as follows. Its accuracy is 0.79, indicating that the model can effectively predict 79% of the samples. A sensitivity of 0.80 indicates that the model can correctly identify 80% of positive samples, and a specificity of 0.53 indicates that the model can correctly identify 53% of negative samples.
+
+```{r}
+pred_xgb = predict(mod_xgb, dtest, outputmargin = F)
+get_m(test$UTI_diag, pred_xgb)
+```
+
+Considering that the distribution of negative and positive in the sample is not very balanced. Here I use auc to compare the effect of logistic regression model and Xgboost model. From the results, it can be found that the AUCs of the two models are only greater than 0.5, indicating that both models can effectively predict the samples. The two curves for the logistic regression model and the Xgboost model are intertwined, indicating that the performance of the two models is roughly equivalent.
+
+```{r}
+dat_pred <- data.frame(y = test$UTI_diag, `Logistic regression` = pred_lr,
+                       `Xgboost` = pred_xgb)
+roc_res <- roc(y ~ ., data = dat_pred)
+ggroc(roc_res, legacy.axes = TRUE) +
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgrey", linetype="dashed") +
+  scale_color_d3() +
+  labs(x = 'False Positive Rate', y = 'True Positive Rate', col = '') +
+  theme_bw() +
+  theme(legend.position = c(0.8, 0.3))
+```
+
+
+##### Check the influence of 'Urinary_tract_infections'
+```{r message = FALSE, warning = FALSE, include=FALSE}
+set.seed(100)
+
+X_train = data.matrix(train[,!(colnames(train) == "UTI_diag")])             
+y_train = train[,"UTI_diag"] 
+
+X_test = data.matrix(test[,!(colnames(test) == "UTI_diag")])                      
+y_test = test[,"UTI_diag"]
+
+xgboost = xgb.DMatrix(data=X_train, label=y_train)
+
+xgb_model <- xgboost(data = xgboost,                   
+                     max.depth=10,        
+                     nrounds=70) 
+summary(xgb_model)
+importance_matrix = xgb.importance(colnames(xgboost), model = xgb_model)
+```
+
+```{r}
+x <- as.data.frame(importance_matrix) 
+head(x,20)
+```
+
+```{r}
+p2 = predict(xgb_model, newdata = X_test)
+caret::MAE(y_test, p2) #mae
+caret::RMSE(y_test, p2) #rmse
+auc(test$UTI_diag, p2) #auc
+```
+
+```{r}
+#create new data containing 'Urinary_tract_infections'
+data_uti = newdata[ , c('UTI_diag','Urinary_tract_infections','chief_complaint','age','gender','race','employStatus','maritalStatus', 'insurance_status','arrival')]
+data_uti$Urinary_tract_infections[data_uti$Urinary_tract_infections == "Yes"]<-1 
+data_uti$Urinary_tract_infections[data_uti$Urinary_tract_infections == "No"]<-0
+data_uti$Urinary_tract_infections <- as.numeric(data_uti$Urinary_tract_infections)
+data_uti$UTI_diag[data_uti$UTI_diag == "Yes"]<-1 
+data_uti$UTI_diag[data_uti$UTI_diag == "No"]<-0 
+data_uti$UTI_diag <- as.numeric(data_uti$UTI_diag)
+```
+
+```{r}
+#One-hot encoder
+dummy <- dummyVars(" ~ .", data=data_uti)
+data_uti <- data.frame(predict(dummy, newdata = data_uti))
+```
+
+```{r}
+#Split into 'Urinary_tract_infections = 1' and 'Urinary_tract_infections = 0'
+data_uti1 = data_uti[which(data_uti$Urinary_tract_infections == 1),]
+data_uti1 = data_uti1[,!(colnames(data_uti1) == "Urinary_tract_infections")]
+data_uti0 = data_uti[which(data_uti$Urinary_tract_infections == 0),]
+data_uti0 = data_uti0[,!(colnames(data_uti0) == "Urinary_tract_infections")]
+```
+
+
+
+```{r}
+#### train,test data split
+parts1 = createDataPartition(data_uti1$UTI_diag, p = 0.8, list = F)
+train1 = data_uti1[parts1, ]
+test1 = data_uti1[-parts1, ]
+```
+
+```{r message = FALSE, warning = FALSE, include=FALSE}
+#create xgboost model
+set.seed(100)
+
+X_train1 = data.matrix(train1[,!(colnames(train1) == "UTI_diag")])             
+y_train1 = train1[,"UTI_diag"] 
+
+X_test1 = data.matrix(test1[,!(colnames(test1) == "UTI_diag")])                      
+y_test1 = test1[,"UTI_diag"]
+
+xgboost = xgb.DMatrix(data=X_train1, label=y_train1)
+
+xgb_model <- xgboost(data = xgboost,                   
+                     max.depth=10,        
+                     nrounds=70) 
+summary(xgb_model)
+importance_matrix = xgb.importance(colnames(xgboost), model = xgb_model)
+```
+
+```{r}
+#Show the feature importance
+x <- as.data.frame(importance_matrix) 
+head(x,20)
+```
+
+```{r}
+#Evaluation
+p2 = predict(xgb_model, newdata = X_test)
+caret::MAE(y_test, p2) #mae
+caret::RMSE(y_test, p2) #rmse
+auc(test$UTI_diag, p2) #auc
+```
+
+```{r}
+#### train,test data split
+parts0 = createDataPartition(data_uti0$UTI_diag, p = 0.8, list = F)
+train0 = data_uti0[parts0, ]
+test0 = data_uti0[-parts0, ]
+```
+
+```{r message = FALSE, warning = FALSE, include=FALSE}
+#Create xgboost model
+set.seed(100)
+
+X_train0 = data.matrix(train0[,!(colnames(train0) == "UTI_diag")])             
+y_train0 = train0[,"UTI_diag"] 
+
+X_test0 = data.matrix(test0[,!(colnames(test0) == "UTI_diag")])                      
+y_test0 = test0[,"UTI_diag"]
+
+xgboost = xgb.DMatrix(data=X_train0, label=y_train0)
+
+xgb_model <- xgboost(data = xgboost,                   
+                     max.depth=10,        
+                     nrounds=70) 
+summary(xgb_model)
+importance_matrix = xgb.importance(colnames(xgboost), model = xgb_model)
+```
+
+```{r}
+#Show the feature importance
+x <- as.data.frame(importance_matrix) 
+head(x,20)
+```
+
+```{r}
+#Evaluation
+p2 = predict(xgb_model, newdata = X_test)
+caret::MAE(y_test, p2) #mae
+caret::RMSE(y_test, p2) #rmse
+auc(test$UTI_diag, p2) #auc
+```
+
+## Interpretation and conclusions
+
+In this project, we use the logistic regression model and the XGboost model to predict the given data, and the accuracy of the two models is as high as 79%, which shows that both models can effectively predict the samples. But in terms of specificity and sensitivity, the specificity of the two models is around 50%. This shows that the two models are poor in identifying negative samples. In addition, based on the XGboost model, it can be found that the most important variable in the data is `age`, followed by `chief_complaint` and `gender`.
+However, we noticed that when the patient is a recurrent uti, the situation will be different from the previous model, especially the changes in important variables. When the patient is a recurrent uti (Urinary_tract_infections = 1), the most important variable in the data is 'age', followed by `genderFemale` and `arrivalCar`, the auc score is 0.59, which is lower than the previous model. When the patient is not a recurrent uti (Urinary_tract_infections = 0), the most important variable in the data is `age`, followed by `genderFemale`, the auc score is 0.8, which is higher than the previous model. 
+
+
+#### Referenes 
+https://www.womenshealth.gov/a-z-topics/urinary-tract-infections
+https://myhealth.alberta.ca/Health/aftercareinformation/pages/conditions.aspx?hwid=av2874
+https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0194085
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8231389/
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8077804/
